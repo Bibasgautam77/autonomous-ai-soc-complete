@@ -1,0 +1,92 @@
+name: autonomous-ai-soc
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: soc_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-soc_app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-CHANGE_ME_DB_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-soc_platform}
+    ports:
+      - "5432:5432"
+    volumes:
+      - soc_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-soc_app}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: soc_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.0
+    container_name: soc_elasticsearch
+    restart: unless-stopped
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - soc_es_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+    container_name: soc_backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-soc_app}:${POSTGRES_PASSWORD:-CHANGE_ME_DB_PASSWORD}@postgres:5432/${POSTGRES_DB:-soc_platform}
+      REDIS_URL: redis://redis:6379/0
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      DETECTION_RULES_PATH: /detection_rules
+      ML_MODEL_PATH: /app/ml_models/isoforest.pkl
+      # Single backend instance in Compose -> safe to keep the embedded
+      # correlation worker on (see k8s/README.md for the multi-replica case).
+      ENABLE_EMBEDDED_CORRELATION_WORKER: "true"
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./detection_rules:/detection_rules:ro
+      - soc_ml_models:/app/ml_models
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: soc_frontend
+    restart: unless-stopped
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+
+volumes:
+  soc_postgres_data:
+  soc_es_data:
+  soc_ml_models:
